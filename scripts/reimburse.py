@@ -345,20 +345,20 @@ def scan_folder(root):
 
 
 def _trip_info(records):
-    """按会议分组聚合出差信息：起止时间（车票+通知日期）、目的地/省份（最早去程到达站，
-    或通知地点）、出差人（车票乘车人，支持多人）。返回 {组名: dict}。"""
+    """按会议分组聚合出差信息：起止时间以车票/机票日期为准（没有票才用会议通知会期）、
+    目的地/省份（最早去程到达站，或通知地点）、出差人（车票乘车人，支持多人）。"""
     trips = {}
     for r in records:
         if r.get("category") != "会议":
             continue
         g = trips.setdefault(r["group"], {
-            "dates": [], "persons": [], "outbound": [], "notice_place": "",
-            "stations": [], "tickets": 0})
+            "ticket_dates": [], "notice_dates": [], "persons": [], "outbound": [],
+            "notice_place": "", "stations": [], "tickets": 0})
         t = r.get("trip_ticket")
         if t:
             g["tickets"] += 1
             if t["date"]:
-                g["dates"].append(t["date"])
+                g["ticket_dates"].append(t["date"])
             for p in t["persons"]:
                 if p not in g["persons"]:
                     g["persons"].append(p)
@@ -367,11 +367,13 @@ def _trip_info(records):
                 g["outbound"].append((t["date"], t["from"], t["to"]))
         n = r.get("trip_notice")
         if n:
-            g["dates"] += n["dates"]
+            g["notice_dates"] += n["dates"]
             if n["place"] and not g["notice_place"]:
                 g["notice_place"] = n["place"]
     for gname, g in trips.items():
-        g["dates"] = sorted(set(g["dates"]))
+        g["ticket_dates"] = sorted(set(g["ticket_dates"]))
+        g["notice_dates"] = sorted(set(g["notice_dates"]))
+        g["dates"] = g["ticket_dates"] or g["notice_dates"]  # 有票以票为准
         g["start"] = g["dates"][0] if g["dates"] else ""
         g["end"] = g["dates"][-1] if g["dates"] else ""
         # 目的地：最早一张车票/机票的到达站（去程），兜底用通知地点或出现最多的非杭州站
