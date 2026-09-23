@@ -88,13 +88,151 @@ def classify(folder_hint, filename, text):
 
 
 def meeting_expense_type(folder_hint, filename, text):
-    """会议类发票细分：会务费 / 住宿费 / 其他费用（对应报销单栏目）。"""
+    """会议类发票细分：交通费（高铁票/机票，票面有电子客票/铁路/代订机票/航班字样）/
+    住宿费 / 会务费 / 其他费用（对应报销单栏目）。"""
+    if text and any(k in text for k in ("电子客票", "铁路", "代订机票", "航班")):
+        return "交通费"
     hay = " ".join([folder_hint or "", filename or "", (text or "")[:1500]])
     if "住宿" in hay:
         return "住宿费"
     if any(k in hay for k in ("会务", "注册", "会费", "会议费")):
         return "会务费"
     return "其他费用"
+
+
+# ---------------- 出差信息识别（会期/地点/省份/出差人） ----------------
+
+# 常见车站/城市 -> 省份（按最长前缀匹配，可继续补充）
+CITY_PROVINCE = {
+    "杭州": "浙江", "金华": "浙江", "宁波": "浙江", "温州": "浙江", "绍兴": "浙江", "嘉兴": "浙江",
+    "上海": "上海", "南京": "江苏", "苏州": "江苏", "无锡": "江苏", "徐州": "江苏",
+    "武汉": "湖北", "武昌": "湖北", "汉口": "湖北", "宜昌": "湖北", "襄阳": "湖北",
+    "北京": "北京", "天津": "天津", "重庆": "重庆",
+    "广州": "广东", "深圳": "广东", "珠海": "广东", "东莞": "广东", "佛山": "广东",
+    "三亚": "海南", "海口": "海南", "博鳌": "海南",
+    "成都": "四川", "绵阳": "四川", "西安": "陕西", "长沙": "湖南", "株洲": "湖南",
+    "青岛": "山东", "济南": "山东", "烟台": "山东", "厦门": "福建", "福州": "福建", "泉州": "福建",
+    "合肥": "安徽", "南昌": "江西", "郑州": "河南", "洛阳": "河南",
+    "昆明": "云南", "贵阳": "贵州", "南宁": "广西", "桂林": "广西",
+    "兰州": "甘肃", "银川": "宁夏", "西宁": "青海", "乌鲁木齐": "新疆", "拉萨": "西藏",
+    "哈尔滨": "黑龙江", "长春": "吉林", "沈阳": "辽宁", "大连": "辽宁",
+    "石家庄": "河北", "太原": "山西", "呼和浩特": "内蒙古",
+}
+
+
+def city_of_station(station):
+    """'杭州西'->'杭州'，'武昌'->'武昌'(city_of 再映射武汉)。逐级去方位后缀。"""
+    s = station.strip()
+    for suf in ("站", "东", "西", "南", "北"):
+        if len(s) > 2 and s.endswith(suf):
+            s = s[:-1]
+    if s in ("武昌", "汉口"):
+        return "武汉"
+    return s
+
+
+def province_of_city(city):
+    if not city:
+        return ""
+    for k in sorted(CITY_PROVINCE, key=len, reverse=True):
+        if city.startswith(k) or k in city:
+            return CITY_PROVINCE[k]
+    return ""
+
+
+TICKET_LINE = re.compile(
+    r"(?P<id>\d{6}\d{8}\*{4}\d{3}[\dXx])?\s*(?P<name>[\u4e00-\u9fa5·]{2,4})\s*$")
+TICKET_TRAVEL = re.compile(r"(20\d{2})年(\d{1,2})月(\d{1,2})日\s*\d{1,2}:\d{2}开")
+STATION_LINE = re.compile(r"^[\u4e00-\u9fa5]{2,6}(?:站)?\s+[GDCKTZ]?\d{1,5}\s+[\u4e00-\u9fa5]{2,6}(?:站)?$")
+
+
+def parse_ticket(text):
+    """铁路电子客票：乘车日期、发到站、乘车人（可多张多人）。"""
+    info = {"date": None, "from": "", "to": "", "persons": []}
+    m = TICKET_TRAVEL.search(text or "")
+    if m:
+        info["date"] = f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if STATION_LINE.match(line):
+            parts = line.split()
+            info["from"], info["to"] = parts[0], parts[-1]
+        m2 = TICKET_LINE.search(line.replace(" ", " "))
+        if "****" in line:
+            tail = line.split()[-1]
+            if re.fullmatch(r"[\u4e00-\u9fa5·]{2,4}", tail) and tail not in info["persons"]:
+                info["persons"].append(tail)
+    return info if (info["date"] and info["from"]) else None
+
+
+NOTICE_DATE = re.compile(r"(20\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日")
+DATE_RANGE = re.compile(
+    r"(20\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?\s*[-—~～至到]+\s*(?:(\d{1,2})\s*月\s*)?(\d{1,2})\s*日")
+TIME_HINTS = ("会议时间", "会议日程", "会期", "召开", "举行", "报到")
+PLACE_HINTS = ("会议地点", "举办地点", "召开", "地点")
+
+
+def city_in_text(s):
+    """在文本中找已知城市名（最长优先），返回规范城市名。"""
+    for k in sorted(CITY_PROVINCE, key=len, reverse=True):
+        if k in (s or ""):
+            return city_of_station(k)
+    return ""
+
+
+def parse_notice(text):
+    """会议通知：会期（只取会议时间/日程相关行，避免注册截止等干扰日期）、地点。
+    支持 '2026年7月30日-8月3日' 这种跨月简写区间。"""
+    dates, place = [], ""
+    lines = (text or "").splitlines()
+    for i, line in enumerate(lines):
+        if any(h in line for h in TIME_HINTS):
+            for y, m1, d1, m2, d2 in DATE_RANGE.findall(line):
+                dates.append(f"{y}-{int(m1):02d}-{int(d1):02d}")
+                mm = int(m2) if m2 else int(m1)
+                dates.append(f"{y}-{mm:02d}-{int(d2):02d}")
+            for y, m, d in NOTICE_DATE.findall(line):
+                dates.append(f"{y}-{int(m):02d}-{int(d):02d}")
+        if not place and any(h in line for h in PLACE_HINTS):
+            cand = line
+            if i + 1 < len(lines) and ("：" not in line and ":" not in line):
+                cand = line + lines[i + 1]  # '三、会议地点' 单独成行，地点在下一行
+            cand = re.split(r"[：:]", cand, 1)[-1].strip()
+            if cand:
+                place = cand[:50]  # 保留原文，城市由 city_in_text 解析
+    if not dates:  # 标题里常带 '（2026年7月30日-8月3日 海南博鳌）'
+        head = " ".join(lines[:5])
+        for y, m1, d1, m2, d2 in DATE_RANGE.findall(head):
+            dates.append(f"{y}-{int(m1):02d}-{int(d1):02d}")
+            mm = int(m2) if m2 else int(m1)
+            dates.append(f"{y}-{mm:02d}-{int(d2):02d}")
+    if not place:
+        place = city_in_text(" ".join(lines[:8]))
+    return {"dates": sorted(set(dates)), "place": place} if (dates or place) else None
+
+
+FLIGHT_ROUTE = re.compile(r"([\u4e00-\u9fa5]{2,6})\s*[-—~～]\s*([\u4e00-\u9fa5]{2,6})\s+[A-Z]{2}\d{3,4}")
+
+
+def parse_flight(text):
+    """机票/代订行程单（携程等）：出发-到达城市、乘机日期、乘机人。
+    日期优先取 '2026/7/30' 这种订单行程日期，避免误用开票日期。"""
+    info = {"date": None, "from": "", "to": "", "persons": []}
+    m = re.search(r"(20\d{2})/(\d{1,2})/(\d{1,2})", text or "")
+    if m:
+        info["date"] = f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    else:
+        for y, mo, d in NOTICE_DATE.findall(text or ""):
+            info["date"] = f"{y}-{int(mo):02d}-{int(d):02d}"
+            break
+    m = FLIGHT_ROUTE.search(text or "")
+    if m:
+        info["from"], info["to"] = m.group(1), m.group(2)
+    for line in (text or "").splitlines():
+        mm = re.search(r"[A-Z]{2}\d{3,4}[，,\s]*(?:20\d{2}/\d{1,2}/\d{1,2})?[，,\s]*([\u4e00-\u9fa5·]{2,4})\s*$", line)
+        if mm and mm.group(1) not in info["persons"]:
+            info["persons"].append(mm.group(1))
+    return info if (info["date"] and (info["from"] or info["persons"])) else None
 
 
 MANUAL_CSV = "纸质发票.csv"
@@ -168,6 +306,13 @@ def scan_folder(root):
                     rec["category"] = classify(folder_hint, fn, None)
                 if rec["category"] == "会议" and rec["kind"] == "invoice":
                     rec["expense_type"] = meeting_expense_type(folder_hint, fn, text)
+                    if text and ("电子客票" in text or "铁路" in text):
+                        rec["trip_ticket"] = parse_ticket(text)
+                    elif text and ("代订机票" in text or "航班" in text or "携程" in text):
+                        rec["trip_ticket"] = parse_flight(text)
+                if rec["category"] == "会议" and rec["kind"] == "document" and text \
+                        and ("通知" in fn or "会议" in text[:200]):
+                    rec["trip_notice"] = parse_notice(text)
             elif ext == ".ofd":
                 rec["kind"] = "ofd"
                 rec["note"] = "OFD格式，未解析金额"
@@ -199,6 +344,55 @@ def scan_folder(root):
     return final
 
 
+def _trip_info(records):
+    """按会议分组聚合出差信息：起止时间（车票+通知日期）、目的地/省份（最早去程到达站，
+    或通知地点）、出差人（车票乘车人，支持多人）。返回 {组名: dict}。"""
+    trips = {}
+    for r in records:
+        if r.get("category") != "会议":
+            continue
+        g = trips.setdefault(r["group"], {
+            "dates": [], "persons": [], "outbound": [], "notice_place": "",
+            "stations": [], "tickets": 0})
+        t = r.get("trip_ticket")
+        if t:
+            g["tickets"] += 1
+            if t["date"]:
+                g["dates"].append(t["date"])
+            for p in t["persons"]:
+                if p not in g["persons"]:
+                    g["persons"].append(p)
+            if t["from"] and t["to"]:
+                g["stations"].append((t["from"], t["to"]))
+                g["outbound"].append((t["date"], t["from"], t["to"]))
+        n = r.get("trip_notice")
+        if n:
+            g["dates"] += n["dates"]
+            if n["place"] and not g["notice_place"]:
+                g["notice_place"] = n["place"]
+    for gname, g in trips.items():
+        g["dates"] = sorted(set(g["dates"]))
+        g["start"] = g["dates"][0] if g["dates"] else ""
+        g["end"] = g["dates"][-1] if g["dates"] else ""
+        # 目的地：最早一张车票/机票的到达站（去程），兜底用通知地点或出现最多的非杭州站
+        dest = ""
+        if g["outbound"]:
+            first = min(g["outbound"])[2]
+            dest = city_of_station(first)
+        if not dest and g["notice_place"]:
+            dest = city_in_text(g["notice_place"])
+        if not dest and g["stations"]:
+            from collections import Counter
+            cnt = Counter(city_of_station(x) for pair in g["stations"] for x in pair)
+            for city, _ in cnt.most_common():
+                if province_of_city(city) and city != "杭州":
+                    dest = city
+                    break
+        g["city"] = dest
+        g["province"] = province_of_city(dest)
+    return trips
+
+
 def _stats(records):
     """返回 (类别合计dict, 分组合计dict)。分组 = (类别, 子文件夹)；会议类再细分费用类型。"""
     totals = {c: 0.0 for c in CATEGORIES}
@@ -212,12 +406,25 @@ def _stats(records):
         counts[c] += 1
         key = (c, r["group"])
         g = groups.setdefault(key, {"count": 0, "amount": 0.0,
-                                    "会务费": 0.0, "住宿费": 0.0, "其他费用": 0.0})
+                                    "会务费": 0.0, "住宿费": 0.0, "交通费": 0.0, "其他费用": 0.0})
         g["count"] += 1
         g["amount"] += r["amount"]
         if r["expense_type"]:
             g[r["expense_type"]] += r["amount"]
     return totals, counts, groups
+
+
+def _print_trip(trips, prefix=""):
+    if not trips:
+        return
+    print()
+    print("出差信息（从车票/会议通知识别）:")
+    print(f"{'会议':<28}{'起始日期':<12}{'结束日期':<12}{'省份':<6}{'目的地':<8}{'出差人'}")
+    for gname, t in trips.items():
+        if not (t["dates"] or t["persons"]):
+            continue
+        print(f"{gname:<30}{t['start']:<14}{t['end']:<14}{t['province']:<8}"
+              f"{t['city']:<10}{'、'.join(t['persons']) or '(未识别)'}")
 
 
 def _print_stats(totals, counts, groups):
@@ -233,15 +440,17 @@ def _print_stats(totals, counts, groups):
     if meet:
         print()
         print("会议费用细分（对应报销单栏目）:")
-        print(f"{'会议':<28}{'会务费':>12}{'住宿费':>12}{'其他费用':>12}{'小计':>12}")
+        print(f"{'会议':<28}{'会务费':>12}{'住宿费':>12}{'交通费':>12}{'其他费用':>12}{'小计':>12}")
         for (c, gname), g in meet:
-            print(f"{gname:<30}{g['会务费']:>12.2f}{g['住宿费']:>12.2f}{g['其他费用']:>12.2f}{g['amount']:>12.2f}")
+            print(f"{gname:<30}{g['会务费']:>12.2f}{g['住宿费']:>12.2f}{g['交通费']:>12.2f}"
+                  f"{g['其他费用']:>12.2f}{g['amount']:>12.2f}")
 
 
 def cmd_scan(a):
     records = scan_folder(a.folder)
     totals, counts, groups = _stats(records)
     _print_stats(totals, counts, groups)
+    _print_trip(_trip_info(records))
     if a.json:
         with open(a.json, "w", encoding="utf-8") as f:
             json.dump(records, f, ensure_ascii=False, indent=2)
@@ -292,11 +501,20 @@ def cmd_organize(a):
         md.append(f"| {c} | {gname} | {g['count']} | {g['amount']:.2f} |")
     meet = [(k, g) for k, g in groups.items() if k[0] == "会议"]
     if meet:
-        md += ["", "## 会议费用细分（对应报销单栏目：会务费 / 住宿费 / 其他费用）", "",
-               "| 会议 | 会务费 | 住宿费 | 其他费用 | 小计 |", "|---|---|---|---|---|"]
+        md += ["", "## 会议费用细分（对应报销单栏目：会务费 / 住宿费 / 交通费 / 其他费用）", "",
+               "| 会议 | 会务费 | 住宿费 | 交通费 | 其他费用 | 小计 |", "|---|---|---|---|---|---|"]
         for (c, gname), g in meet:
-            md.append(f"| {gname} | {g['会务费']:.2f} | {g['住宿费']:.2f} | "
+            md.append(f"| {gname} | {g['会务费']:.2f} | {g['住宿费']:.2f} | {g['交通费']:.2f} | "
                       f"{g['其他费用']:.2f} | {g['amount']:.2f} |")
+    trips = _trip_info(records)
+    if trips:
+        md += ["", "## 出差信息（从车票/会议通知识别，请核对）", "",
+               "| 会议 | 起始日期 | 结束日期 | 省份 | 目的地 | 出差人 |", "|---|---|---|---|---|---|"]
+        for gname, t in trips.items():
+            if not (t["dates"] or t["persons"]):
+                continue
+            md.append(f"| {gname} | {t['start']} | {t['end']} | {t['province']} | "
+                      f"{t['city'] or t['notice_place']} | {'、'.join(t['persons']) or '(未识别)'} |")
     md += ["", "## 文件明细", ""] + lines + [""]
     with open(os.path.join(out, "报销统计.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(md))
@@ -311,6 +529,7 @@ def cmd_organize(a):
     print(f"整理完成: {os.path.abspath(out)}")
     print()
     _print_stats(totals, counts, groups)
+    _print_trip(trips)
 
 
 def _gdi_print(images, job_name="发票打印", landscape=False):
