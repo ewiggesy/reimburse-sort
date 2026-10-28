@@ -534,10 +534,9 @@ def cmd_organize(a):
     _print_trip(trips)
 
 
-def _gdi_print(images, job_name="发票打印", landscape=False):
-    """用 ctypes 调 winspool/gdi32 直接把位图发给默认打印机。不依赖任何阅读器，
-    无对话框。images: PIL.Image 列表，一页一张。landscape=True 时把纸张设为横向
-    （内容需调用方先旋转好，这样横着拿纸字是正的）。"""
+def _gdi_print(images, job_name="发票打印", fit=True):
+    """用 ctypes 调 winspool/gdi32 直接把位图发给默认打印机。纸张方向按图片长边
+    自动选择；fit=True 时铺满可打印区域，fit=False 时按图片 DPI 保持原始尺寸。"""
     import ctypes
     from ctypes import wintypes
 
@@ -579,6 +578,7 @@ def _gdi_print(images, job_name="发票打印", landscape=False):
     if not spool.GetDefaultPrinterW(buf, ctypes.byref(size)):
         raise RuntimeError("系统没有默认打印机，请先在 Windows 设置里添加/选定打印机")
     printer = buf.value
+    landscape = bool(images and images[0].width > images[0].height)
     devmode = None
     hprinter = None
     if landscape:
@@ -613,7 +613,19 @@ def _gdi_print(images, job_name="发票打印", landscape=False):
         max_w, max_h = page_w - 2 * margin, page_h - 2 * margin
         for img in images:
             iw, ih = img.size
-            scale = min(max_w / iw, max_h / ih)
+            if fit:
+                scale = min(max_w / iw, max_h / ih)
+            else:
+                img_dpi = img.info.get("dpi", (96, 96))
+                try:
+                    img_dpi_x = float(img_dpi[0]) if img_dpi[0] else 96.0
+                    img_dpi_y = float(img_dpi[1]) if img_dpi[1] else 96.0
+                except Exception:
+                    img_dpi_x = img_dpi_y = 96.0
+                scale = min(gdi.GetDeviceCaps(hdc, 88) / img_dpi_x,
+                            gdi.GetDeviceCaps(hdc, 90) / img_dpi_y)
+                if iw * scale > page_w or ih * scale > page_h:
+                    scale = min(page_w / iw, page_h / ih)
             dw, dh = max(1, int(iw * scale)), max(1, int(ih * scale))
             x, y = (page_w - dw) // 2, (page_h - dh) // 2
             # BMP 每行必须 4 字节对齐，PIL 输出是紧凑排列，需手动补零，否则越界读崩溃
@@ -656,7 +668,9 @@ def _load_as_pages(path, dpi=300):
         pdf = pdfium.PdfDocument(path)
         for i in range(len(pdf)):
             page = pdf[i]
-            pages.append(page.render(scale=dpi / 72.0).to_pil())
+            img = page.render(scale=dpi / 72.0).to_pil()
+            img.info["dpi"] = (dpi, dpi)
+            pages.append(img)
             page.close()
         pdf.close()
         return pages
@@ -712,7 +726,7 @@ def cmd_print(a):
     printer = _default_printer()
     for t in targets:
         if a.landscape:
-            # 横版需求：只对"发票"把页面内容顺时针旋转90°后用横向纸张打印；会议通知等
+            # 横版需求：只对"发票"把页面内容顺时针旋转90°并保持原始尺寸打印；会议通知等
             # 非发票文档、付款记录图片仍按原始方向直印。发票判定 = 能提取到金额。
             try:
                 pages = _load_as_pages(t, a.dpi)
@@ -725,8 +739,8 @@ def cmd_print(a):
                 if is_invoice:
                     from PIL import Image
                     pages = [p.transpose(Image.Transpose.ROTATE_270) for p in pages]
-                printer = _gdi_print(pages, os.path.basename(t), landscape=is_invoice) or printer
-                tag = "发票顺时针旋转90°横版铺满" if is_invoice else "竖版直印"
+                printer = _gdi_print(pages, os.path.basename(t), fit=not is_invoice) or printer
+                tag = "发票顺时针旋转90°原始尺寸" if is_invoice else "竖版直印"
                 print(f"已发送打印({tag}): {os.path.basename(t)}（{len(pages)} 页 -> {printer}）")
                 printed_pages += len(pages)
                 time.sleep(2)
