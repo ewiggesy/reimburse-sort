@@ -712,9 +712,8 @@ def cmd_print(a):
     printer = _default_printer()
     for t in targets:
         if a.landscape:
-            # 横版需求：只对"发票"把页面内容实际旋转90°后用横向纸张打印；会议通知等
+            # 横版需求：只对"发票"把页面内容顺时针旋转90°后用横向纸张打印；会议通知等
             # 非发票文档、付款记录图片仍按原始方向直印。发票判定 = 能提取到金额。
-            # 旋转方向若反了把 -90 改成 90。
             try:
                 pages = _load_as_pages(t, a.dpi)
                 is_invoice = False
@@ -724,9 +723,10 @@ def cmd_print(a):
                     except Exception:
                         is_invoice = False
                 if is_invoice:
-                    pages = [p.rotate(-90, expand=True) for p in pages]
+                    from PIL import Image
+                    pages = [p.transpose(Image.Transpose.ROTATE_270) for p in pages]
                 printer = _gdi_print(pages, os.path.basename(t), landscape=is_invoice) or printer
-                tag = "发票旋转90°横版铺满" if is_invoice else "竖版直印"
+                tag = "发票顺时针旋转90°横版铺满" if is_invoice else "竖版直印"
                 print(f"已发送打印({tag}): {os.path.basename(t)}（{len(pages)} 页 -> {printer}）")
                 printed_pages += len(pages)
                 time.sleep(2)

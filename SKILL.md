@@ -23,7 +23,7 @@ python <skill目录>/scripts/reimburse.py organize "<发票文件夹>" --out "D:
 
 # 3. 打印（默认模式：PDF 优先 SumatraPDF/Ghostscript 矢量直打默认打印机，图片走 GDI；静默无对话框）
 python <skill目录>/scripts/reimburse.py print "<分类整理输出目录>"
-# 横版模式：仅"发票"（能提取到金额的 PDF）把页面内容实际旋转90°后用横向纸张铺满；
+# 横版模式：仅"发票"（能提取到金额的 PDF）把页面内容顺时针旋转90°后用横向纸张铺满；
 # 不是只设置纸张横向。会议通知等非发票文档保持竖版，照片/截图原样直印，无需重打。
 python <skill目录>/scripts/reimburse.py print --landscape "<分类整理输出目录>"
 
